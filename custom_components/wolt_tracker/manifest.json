@@ -1,12 +1,14 @@
 {
   "domain": "wolt_tracker",
   "name": "Wolt order tracker",
-  "version": "0.1.0",
+  "codeowners": [
+    "@Silenthunt0"
+  ],
+  "config_flow": true,
   "documentation": "https://github.com/Silenthunt0/wolt-tracker",
-  "issue_tracker": "https://github.com/Silenthunt0/wolt-tracker/issues",
-  "codeowners": ["@Silenthunt0"],
-  "dependencies": ["persistent_notification"],
-  "requirements": [],
+  "integration_type": "service",
   "iot_class": "cloud_polling",
-  "integration_type": "service"
+  "issue_tracker": "https://github.com/Silenthunt0/wolt-tracker/issues",
+  "requirements": [],
+  "version": "0.1.0"
 }

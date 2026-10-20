@@ -10,24 +10,17 @@ app's push comes from a server-side rule that cannot be subscribed to.
 1. HACS → ⋮ → **Custom repositories** → add
    `https://github.com/Silenthunt0/wolt-tracker`, category *Integration*.
 2. Install **Wolt order tracker**, restart Home Assistant.
-3. Add the YAML below, restart again. There is no UI config flow.
+3. Settings → Devices & services → **Add integration** → *Wolt order tracker*
+   and paste a refresh token (see [The token](#the-token-the-one-fragile-part)).
+   The dialog does one real token refresh, so a bad token is rejected on the spot.
+4. Thresholds and poll rates live under the integration's **Configure** button:
+   close distance (default 400 m), close ETA (default 3 min), and the three
+   poll intervals (60 s idle, 30 s while preparing, 10 s with the courier en
+   route; wolt.com itself polls every 5 s).
 
-```yaml
-# secrets.yaml
-wolt_refresh_token: "<token from a dedicated wolt.com login, see below>"
-
-# configuration.yaml
-wolt_tracker:
-  refresh_token: !secret wolt_refresh_token
-  close_distance_m: 400   # metres from the drop-off address (default 400)
-  close_eta_minutes: 3    # or when Wolt's ETA is this close (default 3)
-  # idle_interval: 60     # s between orders-list polls when nothing is active
-  # active_interval: 30   # s while the order is being prepared
-  # courier_interval: 10  # s while the courier is en route (wolt.com uses 5)
-```
-
-Add the secret **before** restarting with the new block: a missing `!secret`
-makes the whole configuration invalid.
+No YAML. If Wolt ever rejects the stored token, Home Assistant shows its
+standard *Re-authentication required* prompt on the integration; paste a fresh
+token there.
 
 ## Entities (device "Wolt")
 
@@ -38,7 +31,6 @@ makes the whole configuration invalid.
 | `sensor.wolt_courier_eta` | Wolt's current ETA (timestamp) |
 | `binary_sensor.wolt_courier_close` | on once status is `ready`, the courier is delivering *your* order, and distance ≤ `close_distance_m` or ETA ≤ `close_eta_minutes` (and in the future); latched until the order is delivered |
 | `binary_sensor.wolt_order_active` | an order is in progress |
-| `binary_sensor.wolt_auth_problem` | refresh token rejected; a persistent notification is raised too |
 
 Only the newest in-progress order is followed.
 
@@ -69,11 +61,10 @@ login nobody else refreshes:
 2. DevTools → Application → Cookies → `https://wolt.com` → copy the refresh
    token value (bare string, without the URL-encoded quotes).
 3. **Close the private window** and never use that session again.
-4. Put it in `secrets.yaml`, restart. Rotated tokens are persisted in
-   `.storage/wolt_tracker.tokens`; the secret is re-read only when it changes.
-5. If `binary_sensor.wolt_auth_problem` turns on, repeat 1–3 and either edit
-   the secret and restart, or call the `wolt_tracker.set_refresh_token`
-   action with the new token (no restart needed).
+4. Paste it into the integration dialog. Every rotated token is written back
+   to the config entry immediately, so a restart never loses the chain.
+5. If Wolt rejects the token later, the integration shows HA's standard
+   *Re-authentication required* prompt: repeat 1–3 and paste the new value.
 
 Your normal browser and phone Wolt sessions are separate logins and are not
 affected.
@@ -81,5 +72,5 @@ affected.
 ## Caveats
 
 Unofficial API: field names may change without notice. Each poll validates
-the payload shape and raises a Home Assistant notification instead of
-failing silently. Polling stays well below what wolt.com's own page does.
+the payload shape and surfaces failures through the entity availability and
+HA's re-authentication prompt instead of failing silently. Polling stays well below what wolt.com's own page does.

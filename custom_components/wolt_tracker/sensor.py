@@ -12,19 +12,17 @@ from homeassistant.components.sensor import (
 from homeassistant.const import UnitOfLength
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-from .const import DOMAIN
+from . import WoltConfigEntry
 from .entity import WoltEntity
 
 
-async def async_setup_platform(
+async def async_setup_entry(
     hass: HomeAssistant,
-    config: ConfigType,
+    entry: WoltConfigEntry,
     async_add_entities: AddEntitiesCallback,
-    discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    coordinator = hass.data[DOMAIN]
+    coordinator = entry.runtime_data
     async_add_entities(
         [
             WoltOrderStatusSensor(coordinator),
@@ -57,7 +55,6 @@ class WoltOrderStatusSensor(WoltEntity, SensorEntity):
             "eta": s.eta.isoformat() if s.eta else None,
             "eta_min": s.eta_min.isoformat() if s.eta_min else None,
             "eta_max": s.eta_max.isoformat() if s.eta_max else None,
-            "auth_ok": s.auth_ok,
             "last_update": s.last_update.isoformat() if s.last_update else None,
         }
 

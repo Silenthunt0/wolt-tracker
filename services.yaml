@@ -1,0 +1,11 @@
+set_refresh_token:
+  name: Set refresh token
+  description: >-
+    Replace the stored Wolt refresh token (after re-login) without restarting
+    Home Assistant. Paste the refresh_token value from a fresh wolt.com login.
+  fields:
+    refresh_token:
+      name: Refresh token
+      required: true
+      selector:
+        text:

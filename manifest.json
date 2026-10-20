@@ -1,0 +1,11 @@
+{
+  "domain": "wolt_tracker",
+  "name": "Wolt order tracker",
+  "version": "0.1.0",
+  "documentation": "https://github.com/anthonyivanov/homeassistant",
+  "codeowners": [],
+  "dependencies": ["persistent_notification"],
+  "requirements": [],
+  "iot_class": "cloud_polling",
+  "integration_type": "service"
+}

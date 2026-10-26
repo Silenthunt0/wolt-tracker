@@ -30,6 +30,7 @@ from .const import (
     EVENT_SUPPORT_MESSAGE,
     STATUS_READY,
     SUPPORT_STATUS_OPENED,
+    SUPPORT_STATUS_RESOLVED,
     SUPPORT_TRANSCRIPT_LIMIT,
     TERMINAL_STATUSES,
 )
@@ -273,14 +274,24 @@ class WoltCoordinator(DataUpdateCoordinator[WoltState]):
     async def _poll_support(self, state: WoltState, prev: WoltState) -> None:
         data = await self.api.async_support_conversations(SUPPORT_STATUS_OPENED)
         convs = [c for c in data["conversations"] if isinstance(c, dict) and c.get("id")]
-        if not convs:
+        history = False
+        if not convs and prev.support_conversation_id:
             # Nothing open. Keep the last conversation readable but mark it
             # closed; the "unread" signal only ever refers to an open chat.
             state.copy_support_from(prev)
-            state.support_status = "resolved" if prev.support_conversation_id else None
+            state.support_status = SUPPORT_STATUS_RESOLVED
             state.support_unread = False
             state.support_unread_ids = []
             return
+        if not convs:
+            # Nothing open and nothing remembered (first poll after start):
+            # show the most recent closed chat so the sensor is readable.
+            # History is never "unread" and never fires the event.
+            data = await self.api.async_support_conversations(SUPPORT_STATUS_RESOLVED)
+            convs = [c for c in data["conversations"] if isinstance(c, dict) and c.get("id")]
+            history = True
+            if not convs:
+                return
 
         latest = {
             m.get("conversationId"): m
@@ -360,6 +371,9 @@ class WoltCoordinator(DataUpdateCoordinator[WoltState]):
         else:
             state.support_transcript = prev.support_transcript
             state.support_unread_ids = prev.support_unread_ids if state.support_unread else []
+        if history:
+            state.support_unread = False
+            state.support_unread_ids = []
 
         # A new agent message that nobody has read yet: tell the automations once.
         if (

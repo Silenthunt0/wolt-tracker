@@ -42,7 +42,10 @@ token there.
 Only the newest in-progress order is followed. For the chat, the open
 conversation whose `purchaseId` matches that order is followed, else the most
 recently updated open one; once it is resolved the last message stays
-readable with `conversation_status: resolved`.
+readable with `conversation_status: resolved`. When nothing is open at
+startup, the sensor is seeded from the most recent resolved chat, so it is
+never `unknown` once you have chatted with support at least once. History
+never counts as unread and never fires the event.
 
 Example automation:
 

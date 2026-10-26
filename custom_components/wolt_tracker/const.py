@@ -51,3 +51,4 @@ ORDER_STATUS_IN_PROGRESS = "IN_PROGRESS"  # orders page, telemetry.order_status_
 STATUS_READY = "ready"  # order_details.status while the courier is en route
 TERMINAL_STATUSES = {"delivered", "rejected", "refunded"}
 SUPPORT_STATUS_OPENED = "opened"
+SUPPORT_STATUS_RESOLVED = "resolved"

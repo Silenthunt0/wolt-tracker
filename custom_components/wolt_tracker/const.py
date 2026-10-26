@@ -36,8 +36,14 @@ SUBSCRIPTION_URL = "https://restaurant-api.wolt.com/v2/order_details/subscriptio
 REVIEW_TEMPLATE_URL = "https://restaurant-api.wolt.com/v1/reviews/purchases/{purchase_id}/template"
 REVIEW_URL = "https://restaurant-api.wolt.com/v1/reviews/purchases/{purchase_id}"
 RATING_SECTIONS = ("food", "delivery")  # step 1 and step 2 of the prompt
+# People (and the services) rate 1..5; Wolt's API counts the smileys 0..4
+# (verified from a captured web request: the top smiley is sent as 4).
 RATING_MIN = 1
 RATING_MAX = 5
+RATING_API_OFFSET = 1  # api value = rating - offset
+# Template "tags" that are UI buttons, not attributions: "comment" opens the
+# comment box, "missing item" opens an item picker (sends an items list).
+RATING_PSEUDO_TAGS = {"comment", "missing item"}
 
 # Support chat ("Converse", Wolt's in-house chat backend behind the support
 # widget). The Wolt access token is exchanged for a Converse token.

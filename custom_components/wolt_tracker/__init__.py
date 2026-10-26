@@ -11,6 +11,7 @@ answers support or rates an order on its own.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -39,6 +40,7 @@ from .const import (
     CONF_EXPIRES_AT,
     CONF_REFRESH_TOKEN,
     DOMAIN,
+    RATING_API_OFFSET,
     RATING_MAX,
     RATING_MIN,
     RATING_SECTIONS,
@@ -177,7 +179,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 if key not in keys:
                     keys.append(key)
             entry: dict[str, Any] = {
-                "rating": rating,
+                "rating": rating - RATING_API_OFFSET,  # Wolt counts the smileys 0..4
                 "variant_name": form.get("variant_name"),
                 "attribution": keys,
                 "skipped": False,
@@ -189,7 +191,17 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         try:
             await coordinator.api.async_review_submit(purchase_id, review)
         except WoltApiError as err:
-            raise HomeAssistantError(f"Wolt did not accept the rating: {err}") from err
+            # Surface what was sent and what Wolt's form looked like: the body
+            # shape is reconstructed from the web app, so this is the evidence.
+            _LOGGER.warning(
+                "Wolt rejected the rating for %s. Sent: %s. Form from Wolt: %s",
+                purchase_id,
+                json.dumps(review, ensure_ascii=False),
+                json.dumps(coordinator.rating_template_raw(purchase_id), ensure_ascii=False),
+            )
+            raise HomeAssistantError(
+                f"Wolt did not accept the rating: {err}. Body sent: {json.dumps(review, ensure_ascii=False)}"
+            ) from err
         _LOGGER.info("Rated Wolt order %s: %s", purchase_id, {k: v.get("rating", "skipped") for k, v in review.items()})
         try:
             await coordinator.api.async_unsubscribe_order(purchase_id)

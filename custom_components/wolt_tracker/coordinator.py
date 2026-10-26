@@ -29,6 +29,8 @@ from .const import (
     DOMAIN,
     EVENT_RATING_PENDING,
     EVENT_SUPPORT_MESSAGE,
+    RATING_API_OFFSET,
+    RATING_PSEUDO_TAGS,
     RATING_SECTIONS,
     STATUS_DELIVERED,
     STATUS_READY,
@@ -155,6 +157,7 @@ class WoltCoordinator(DataUpdateCoordinator[WoltState]):
         self._purchase_id: str | None = None
         self._close_latched_for: str | None = None
         self._rating_templates: dict[str, dict[str, Any]] = {}  # purchase_id -> normalised template
+        self._rating_templates_raw: dict[str, dict[str, Any]] = {}  # as Wolt sent it, for diagnostics
 
     def apply_options(self, options: dict[str, Any]) -> None:
         self.close_distance = float(options.get(CONF_CLOSE_DISTANCE, DEFAULT_CLOSE_DISTANCE))
@@ -309,7 +312,9 @@ class WoltCoordinator(DataUpdateCoordinator[WoltState]):
         template = self._rating_templates.get(pid)
         if template is None:
             try:
-                template = self._normalise_template(await self.api.async_review_template(pid))
+                raw = await self.api.async_review_template(pid)
+                self._rating_templates_raw[pid] = raw
+                template = self._normalise_template(raw)
                 self._rating_templates[pid] = template
             except WoltApiError as err:
                 # Still announce; the rate service re-fetches the template itself.
@@ -332,18 +337,26 @@ class WoltCoordinator(DataUpdateCoordinator[WoltState]):
         """Normalised rating form for an order (cached per order)."""
         template = self._rating_templates.get(purchase_id)
         if template is None:
-            template = self._normalise_template(await self.api.async_review_template(purchase_id))
+            raw = await self.api.async_review_template(purchase_id)
+            self._rating_templates_raw[purchase_id] = raw
+            template = self._normalise_template(raw)
             self._rating_templates[purchase_id] = template
         return template
 
+    def rating_template_raw(self, purchase_id: str) -> dict[str, Any] | None:
+        return self._rating_templates_raw.get(purchase_id)
+
     def forget_rating(self, purchase_id: str) -> None:
         self._rating_templates.pop(purchase_id, None)
+        self._rating_templates_raw.pop(purchase_id, None)
 
     @staticmethod
     def _normalise_template(results: dict[str, Any]) -> dict[str, Any]:
         """Flatten Wolt's template into what a person (or an LLM) needs to
         pick a value: per section the five labels (value = position, 1..5)
-        and which tags may accompany which value."""
+        and which tags may accompany which value. Wolt numbers the smileys
+        0..4 in attribution_options and in the review body; everything here
+        is shifted to 1..5 and shifted back when sending."""
         out: dict[str, Any] = {}
         for section in RATING_SECTIONS:
             raw = results.get(section)
@@ -360,10 +373,10 @@ class WoltCoordinator(DataUpdateCoordinator[WoltState]):
                     continue
                 for value in opt.get("ratings") or []:
                     if isinstance(value, int):
-                        tags.setdefault(value, []).extend(
+                        tags.setdefault(value + RATING_API_OFFSET, []).extend(
                             {"key": t.get("key"), "name": t.get("name")}
                             for t in opt.get("tags") or []
-                            if isinstance(t, dict) and t.get("key")
+                            if isinstance(t, dict) and t.get("key") and t["key"] not in RATING_PSEUDO_TAGS
                         )
             out[section] = {
                 "title": raw.get("title"),

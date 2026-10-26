@@ -40,6 +40,12 @@ token there.
 | `sensor.wolt_support_last_message` | latest message in the followed support chat (state cut to 255 chars); attributes: full `message`, `from` (`agent` / `me`), `agent`, `conversation_status`, `purchase_id`, `venue`, `transcript` (last 10 messages) |
 | `binary_sensor.wolt_rating_pending` | on while a delivered order waits for its rating; attributes: `purchase_id`, `venue`, `ordered_at`, `steps`, `food_ratings`, `food_tags`, `delivery_ratings`, `delivery_tags` |
 
+Entity ids above assume the device has no area. Home Assistant prefixes the
+id of every entity created after the device was placed in an area with that
+area's name (`binary_sensor.outside_wolt_rating_pending`), so look the ids
+up in Developer tools or resolve them with
+`integration_entities('wolt_tracker')` in templates.
+
 Only the newest in-progress order is followed. For the chat, the open
 conversation whose `purchaseId` matches that order is followed, else the most
 recently updated open one; once it is resolved the last message stays
@@ -111,9 +117,13 @@ prompt was closed, and that is exactly when the app shows its two-step
 Both default to the pending order and accept `purchase_id`. Nothing in the
 integration rates on its own. Rating in the app clears the sensor on the
 next poll. Tipping is part of the app's second step but is a payment and is
-deliberately not implemented. The request bodies were reconstructed from
-the web app and have not been exercised against a live order yet; the first
-real rating is the test.
+deliberately not implemented.
+
+Ratings are 1 to 5 here; Wolt's API numbers the smileys 0 to 4 and the
+integration shifts them. The body and the close call match a rating
+captured from wolt.com. The template's "+ Add a comment" and "An item was
+missing" entries are buttons in the app, not tags, so they are left out of
+the attributes; use the comment fields for free text.
 
 ## The token (the one fragile part)
 

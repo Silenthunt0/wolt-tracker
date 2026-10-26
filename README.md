@@ -5,6 +5,11 @@ order-tracking page makes) and derives a **"courier is close"** signal from
 the courier's live GPS position. Wolt exposes no such flag on the web; the
 app's push comes from a server-side rule that cannot be subscribed to.
 
+It also watches the **Wolt support chat**, where operations write about the
+order in progress ("only one of X available, replace with Y?"), so Home
+Assistant can tell you a message arrived, read it to you and, only when you
+ask, send your reply.
+
 ## Install (HACS)
 
 1. HACS → ⋮ → **Custom repositories** → add
@@ -31,8 +36,13 @@ token there.
 | `sensor.wolt_courier_eta` | Wolt's current ETA (timestamp) |
 | `binary_sensor.wolt_courier_close` | on once status is `ready`, the courier is delivering *your* order, and distance ≤ `close_distance_m` or ETA ≤ `close_eta_minutes` (and in the future); latched until the order is delivered |
 | `binary_sensor.wolt_order_active` | an order is in progress |
+| `binary_sensor.wolt_support_unread` | on while the latest message in the open support chat is from a Wolt agent and has no read receipt from you; attributes carry the text, agent, conversation and purchase id |
+| `sensor.wolt_support_last_message` | latest message in the followed support chat (state cut to 255 chars); attributes: full `message`, `from` (`agent` / `me`), `agent`, `conversation_status`, `purchase_id`, `venue`, `transcript` (last 10 messages) |
 
-Only the newest in-progress order is followed.
+Only the newest in-progress order is followed. For the chat, the open
+conversation whose `purchaseId` matches that order is followed, else the most
+recently updated open one; once it is resolved the last message stays
+readable with `conversation_status: resolved`.
 
 Example automation:
 
@@ -49,6 +59,34 @@ actions:
         {{ state_attr('binary_sensor.wolt_courier_close', 'distance_m') }} m away
 ```
 
+## Support chat
+
+Every new message written by a Wolt agent fires the event
+`wolt_tracker_support_message` once, with `conversation_id`, `purchase_id`,
+`venue` (when the chat is about the followed order), `agent`, `message`,
+`message_id`, `received_at` and `unread_count`. Trigger an automation on it
+to announce or push the message.
+
+Two services act on the followed open conversation (both take an optional
+`conversation_id` to target another one):
+
+| Service | What it does |
+| --- | --- |
+| `wolt_tracker.reply` | posts `message` into the chat, as you. Nothing in the integration calls it on its own. |
+| `wolt_tracker.mark_read` | sends read receipts for the unread agent messages, which turns `binary_sensor.wolt_support_unread` off, the same as reading them in the app |
+
+Unread is derived from Wolt's own read receipts, so reading the chat in the
+Wolt app clears it too. The chat is polled on the same schedule as the order
+and a chat failure never affects the courier tracking (it is logged and the
+last chat state is kept). Sending was reconstructed from the web widget and
+has not been exercised against a live agent yet; the first real reply is the
+test.
+
+The chat backend is Wolt's in-house "Converse" service. It needs its own
+bearer token, obtained by exchanging the current Wolt access token in a
+single POST, so it involves no refresh chain and cannot invalidate the login
+below.
+
 ## The token (the one fragile part)
 
 Wolt access tokens live 30 min; the integration refreshes them with a refresh
@@ -58,8 +96,10 @@ token again revokes the one issued after it. So Home Assistant must own a
 login nobody else refreshes:
 
 1. Open a **private/incognito window**, log in at wolt.com.
-2. DevTools → Application → Cookies → `https://wolt.com` → copy the refresh
-   token value (bare string, without the URL-encoded quotes).
+2. DevTools → Application → Cookies → `https://wolt.com` → copy the value of
+   the **`__wrtoken`** cookie: that is the refresh token (bare string, without
+   the URL-encoded quotes). `__wtoken` is the short-lived access token and is
+   not what the integration needs.
 3. **Close the private window** and never use that session again.
 4. Paste it into the integration dialog. Every rotated token is written back
    to the config entry immediately, so a restart never loses the chain.

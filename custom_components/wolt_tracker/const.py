@@ -27,9 +27,27 @@ AUTH_URL = "https://authentication.wolt.com/v1/wauth2/access_token"
 ORDERS_URL = "https://consumer-api.wolt.com/order-xp/web/v1/pages/orders"
 TRACKING_URL = "https://restaurant-api.wolt.com/v2/order_details/purchase_tracking/{purchase_id}"
 
+# Support chat ("Converse", Wolt's in-house chat backend behind the support
+# widget). The Wolt access token is exchanged for a Converse token.
+CONVERSE_BASE = "https://converse-api.wolt.com"
+CONVERSE_APP_ID = "wolt-consumer"
+CONVERSE_TOKEN_URL = f"{CONVERSE_BASE}/auth-api/v1/token"
+CONVERSE_WIDGET_URL = f"{CONVERSE_BASE}/widget-api/v1/{CONVERSE_APP_ID}"
+CONVERSE_TOKEN_REFRESH_MARGIN = 120  # s; the token lives 1800 s
+SUPPORT_TRANSCRIPT_LIMIT = 10  # messages kept in the sensor attribute
+
+# Fired once per new support message written by a Wolt agent.
+EVENT_SUPPORT_MESSAGE = "wolt_tracker_support_message"
+
+SERVICE_REPLY = "reply"
+SERVICE_MARK_READ = "mark_read"
+ATTR_MESSAGE = "message"
+ATTR_CONVERSATION_ID = "conversation_id"
+
 # Refresh the access token this long before it expires (it lives 1800 s).
 TOKEN_REFRESH_MARGIN = 120
 
 ORDER_STATUS_IN_PROGRESS = "IN_PROGRESS"  # orders page, telemetry.order_status_type
 STATUS_READY = "ready"  # order_details.status while the courier is en route
 TERMINAL_STATUSES = {"delivered", "rejected", "refunded"}
+SUPPORT_STATUS_OPENED = "opened"

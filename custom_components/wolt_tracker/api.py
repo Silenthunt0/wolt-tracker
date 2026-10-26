@@ -1,9 +1,14 @@
-"""Thin client for the three Wolt endpoints we need, with refresh-token rotation.
+"""Thin client for the Wolt endpoints we need, with refresh-token rotation,
+plus the support chat ("Converse") calls behind Wolt's support widget.
 
 Wolt rotates the refresh token on every refresh and keeps only the newest one
 alive, so each rotation is handed to `on_tokens` immediately for persisting,
 and this client must be the sole user of its token chain (never share the
 token with a browser session).
+
+The support chat needs its own bearer token. It is obtained by exchanging the
+current Wolt access token (one POST, no refresh chain involved), so a chat
+problem can never invalidate the order-tracking login.
 """
 
 from __future__ import annotations
@@ -13,6 +18,7 @@ import base64
 import json
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -20,6 +26,10 @@ import aiohttp
 
 from .const import (
     AUTH_URL,
+    CONVERSE_APP_ID,
+    CONVERSE_TOKEN_REFRESH_MARGIN,
+    CONVERSE_TOKEN_URL,
+    CONVERSE_WIDGET_URL,
     ORDER_STATUS_IN_PROGRESS,
     ORDERS_URL,
     TOKEN_REFRESH_MARGIN,
@@ -40,6 +50,17 @@ API_HEADERS = {
         "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
     ),
 }
+
+CONVERSE_HEADERS = {
+    "x-converse-platform": "web",
+    "x-converse-client": "wolt-consumer/1.16.152; conveyer-app/ha-wolt-tracker",
+    "x-converse-language": "en-US",
+    "origin": "https://wolt.com",
+    "referer": "https://wolt.com/",
+    "user-agent": API_HEADERS["user-agent"],
+}
+
+TIMEOUT = aiohttp.ClientTimeout(total=15)
 
 
 class WoltAuthError(Exception):
@@ -75,6 +96,13 @@ class WoltApi:
         self.expires_at = expires_at
         self._on_tokens = on_tokens
         self._lock = asyncio.Lock()
+        # Support chat
+        self.contact_id: str | None = None  # my participant id in Converse
+        self._converse_token: str | None = None
+        self._converse_expires = 0.0
+        self._converse_lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------ auth
 
     async def async_refresh(self) -> None:
         """Exchange the refresh token for a new access + refresh token."""
@@ -86,7 +114,7 @@ class WoltApi:
                 AUTH_URL,
                 data=data,
                 headers={"origin": "https://wolt.com"},
-                timeout=aiohttp.ClientTimeout(total=15),
+                timeout=TIMEOUT,
             ) as resp:
                 if resp.status in (400, 401, 403):
                     body = await resp.text()
@@ -119,7 +147,7 @@ class WoltApi:
             headers = {**API_HEADERS, "Authorization": f"Bearer {token}"}
             try:
                 async with self._session.get(
-                    url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=15)
+                    url, headers=headers, params=params, timeout=TIMEOUT
                 ) as resp:
                     if resp.status == 401 and attempt == 0:
                         # Access token revoked early: force one refresh and retry.
@@ -133,6 +161,8 @@ class WoltApi:
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 raise WoltApiError(f"GET {url} failed: {err}") from err
         raise WoltApiError(f"GET {url} kept returning 401")
+
+    # ---------------------------------------------------------------- orders
 
     async def async_active_orders(self) -> list[dict[str, Any]]:
         """In-progress orders from the orders page, newest first."""
@@ -153,3 +183,136 @@ class WoltApi:
         if not isinstance(data, dict) or "order_details" not in data:
             raise WoltApiError(f"tracking payload malformed: {str(data)[:200]}")
         return data
+
+    # ---------------------------------------------------------- support chat
+
+    async def _converse_exchange(self) -> str:
+        """Trade the current Wolt access token for a Converse bearer token.
+
+        Also (re)registers the contact, which is how we learn our own
+        participant id; that id is what Wolt's read receipts refer to.
+        """
+        access = await self._ensure_token()
+        headers = {**CONVERSE_HEADERS, "x-converse-request-id": str(uuid.uuid4())}
+        try:
+            async with self._session.put(
+                f"{CONVERSE_WIDGET_URL}/contact",
+                json={"idp": "wolt", "accessToken": access},
+                headers=headers,
+                timeout=TIMEOUT,
+            ) as resp:
+                if resp.status != 200:
+                    raise WoltApiError(f"converse contact registration -> HTTP {resp.status}")
+                contact = await resp.json(content_type=None)
+            async with self._session.post(
+                CONVERSE_TOKEN_URL,
+                json={
+                    "grantType": "wolt_access_token",
+                    "audience": "converse_widget",
+                    "workspaceId": "wolt",
+                    "appId": CONVERSE_APP_ID,
+                    "accessToken": access,
+                },
+                headers=headers,
+                timeout=TIMEOUT,
+            ) as resp:
+                if resp.status != 200:
+                    raise WoltApiError(f"converse token exchange -> HTTP {resp.status}")
+                payload = await resp.json(content_type=None)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            raise WoltApiError(f"converse auth failed: {err}") from err
+        contact_id = ((contact or {}).get("contact") or {}).get("id") if isinstance(contact, dict) else None
+        if contact_id:
+            self.contact_id = contact_id
+        try:
+            self._converse_token = payload["accessToken"]
+            self._converse_expires = time.time() + float(payload.get("expiresIn", 1800))
+        except (KeyError, TypeError) as err:
+            raise WoltApiError(f"unexpected converse token payload: {str(payload)[:200]}") from err
+        _LOGGER.debug("Converse token obtained, valid for %s s", payload.get("expiresIn"))
+        return self._converse_token
+
+    async def _ensure_converse(self, force: bool = False) -> str:
+        async with self._converse_lock:
+            if (
+                force
+                or not self._converse_token
+                or time.time() > self._converse_expires - CONVERSE_TOKEN_REFRESH_MARGIN
+            ):
+                await self._converse_exchange()
+            assert self._converse_token
+            return self._converse_token
+
+    async def _converse(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: list[tuple[str, str]] | None = None,
+        json_body: Any = None,
+        idempotent: bool = False,
+    ) -> Any:
+        token = await self._ensure_converse()
+        url = f"{CONVERSE_WIDGET_URL}/{path}"
+        for attempt in (0, 1):
+            headers = {
+                **CONVERSE_HEADERS,
+                "Authorization": f"Bearer {token}",
+                "x-converse-request-id": str(uuid.uuid4()),
+            }
+            if idempotent:
+                headers["Idempotency-Key"] = str(uuid.uuid4())
+            try:
+                async with self._session.request(
+                    method, url, params=params, json=json_body, headers=headers, timeout=TIMEOUT
+                ) as resp:
+                    if resp.status == 401 and attempt == 0:
+                        token = await self._ensure_converse(force=True)
+                        continue
+                    if resp.status not in (200, 201, 204):
+                        body = await resp.text()
+                        raise WoltApiError(f"{method} {path} -> HTTP {resp.status}: {body[:200]}")
+                    if resp.status == 204:
+                        return None
+                    return await resp.json(content_type=None)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                raise WoltApiError(f"{method} {path} failed: {err}") from err
+        raise WoltApiError(f"{method} {path} kept returning 401")
+
+    async def async_support_conversations(self, status: str = "opened") -> dict[str, Any]:
+        """Support conversations with the given status, plus their latest
+        message (with read receipts) and the agents involved."""
+        data = await self._converse(
+            "GET", "conversations", params=[("status", status), ("types", "support")]
+        )
+        if not isinstance(data, dict) or not isinstance(data.get("conversations"), list):
+            raise WoltApiError(f"conversations payload malformed: {str(data)[:200]}")
+        return data
+
+    async def async_support_messages(self, conversation_id: str) -> dict[str, Any]:
+        data = await self._converse(
+            "GET",
+            f"conversations/{conversation_id}/messages",
+            params=[("types", "regular"), ("types", "widget")],
+        )
+        if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
+            raise WoltApiError(f"messages payload malformed: {str(data)[:200]}")
+        return data
+
+    async def async_support_send(self, conversation_id: str, text: str) -> Any:
+        """Post a message from the customer into a support conversation."""
+        return await self._converse(
+            "POST",
+            f"conversations/{conversation_id}/messages",
+            json_body={"message": {"body": text, "attachments": []}},
+            idempotent=True,
+        )
+
+    async def async_support_mark_read(self, conversation_id: str, message_ids: list[str]) -> Any:
+        if not message_ids:
+            return None
+        return await self._converse(
+            "POST",
+            f"conversations/{conversation_id}/messages/readBy",
+            json_body={"messageIds": message_ids},
+        )

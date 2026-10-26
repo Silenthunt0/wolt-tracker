@@ -1,4 +1,4 @@
-"""Sensors: order status, courier distance, courier ETA."""
+"""Sensors: order status, courier distance, courier ETA, support last message."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfLength
+from homeassistant.const import MAX_LENGTH_STATE_STATE, UnitOfLength
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -28,6 +28,7 @@ async def async_setup_entry(
             WoltOrderStatusSensor(coordinator),
             WoltCourierDistanceSensor(coordinator),
             WoltCourierEtaSensor(coordinator),
+            WoltSupportMessageSensor(coordinator),
         ]
     )
 
@@ -102,3 +103,41 @@ class WoltCourierEtaSensor(WoltEntity, SensorEntity):
     @property
     def native_value(self):
         return self.state_data.eta
+
+
+class WoltSupportMessageSensor(WoltEntity, SensorEntity):
+    """Latest message in the support chat we follow. The state is the text
+    (cut to HA's 255-character state limit); the full text, who wrote it and
+    a short transcript are attributes."""
+
+    _attr_name = "Support last message"
+    _attr_icon = "mdi:message-text"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "support_last_message")
+
+    @property
+    def native_value(self) -> str | None:
+        text = self.state_data.support_message
+        if not text:
+            return None
+        text = " ".join(text.split())
+        if len(text) > MAX_LENGTH_STATE_STATE:
+            text = text[: MAX_LENGTH_STATE_STATE - 1] + "…"
+        return text
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        s = self.state_data
+        return {
+            "message": s.support_message,
+            "from": s.support_message_from,
+            "agent": s.support_agent,
+            "received_at": s.support_message_at.isoformat() if s.support_message_at else None,
+            "unread": s.support_unread,
+            "conversation_id": s.support_conversation_id,
+            "conversation_status": s.support_status,
+            "purchase_id": s.support_purchase_id,
+            "venue": s.venue_name if s.support_purchase_id == s.purchase_id else None,
+            "transcript": s.support_transcript,
+        }

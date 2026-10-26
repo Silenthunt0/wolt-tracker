@@ -38,5 +38,31 @@
         }
       }
     }
+  },
+  "services": {
+    "reply": {
+      "name": "Reply to support",
+      "description": "Sends a message from you into the open Wolt support conversation (the one about the active order). Nothing is sent unless this service is called.",
+      "fields": {
+        "message": {
+          "name": "Message",
+          "description": "The text to send, as you want the agent to read it."
+        },
+        "conversation_id": {
+          "name": "Conversation",
+          "description": "Converse conversation id. Defaults to the open conversation the integration follows."
+        }
+      }
+    },
+    "mark_read": {
+      "name": "Mark support messages read",
+      "description": "Sends read receipts for the unread agent messages in the followed conversation, which turns the Support unread sensor off.",
+      "fields": {
+        "conversation_id": {
+          "name": "Conversation",
+          "description": "Converse conversation id. Defaults to the followed conversation."
+        }
+      }
+    }
   }
 }

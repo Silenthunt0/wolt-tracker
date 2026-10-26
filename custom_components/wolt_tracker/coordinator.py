@@ -1,10 +1,11 @@
-"""Adaptive poller that derives the "courier close" signal."""
+"""Adaptive poller that derives the "courier close" signal and watches the
+support chat for messages from Wolt's agents."""
 
 from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -26,7 +27,10 @@ from .const import (
     DEFAULT_COURIER_INTERVAL,
     DEFAULT_IDLE_INTERVAL,
     DOMAIN,
+    EVENT_SUPPORT_MESSAGE,
     STATUS_READY,
+    SUPPORT_STATUS_OPENED,
+    SUPPORT_TRANSCRIPT_LIMIT,
     TERMINAL_STATUSES,
 )
 
@@ -48,6 +52,16 @@ def _mongo_date(value: Any) -> datetime | None:
     if isinstance(value, dict) and isinstance(value.get("$date"), (int, float)):
         return datetime.fromtimestamp(value["$date"] / 1000, tz=timezone.utc)
     return None
+
+
+def _iso_date(value: Any) -> datetime | None:
+    """Converse serialises datetimes as ISO 8601 with a Z suffix."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -72,6 +86,36 @@ class WoltState:
     courier_distance_m: float | None = None
     courier_close: bool = False
     last_update: datetime | None = None
+
+    # Support chat (the conversation we follow: the one about the active
+    # order if there is one, else the most recently updated open one).
+    support_conversation_id: str | None = None
+    support_status: str | None = None  # opened / resolved / None
+    support_purchase_id: str | None = None
+    support_agent: str | None = None
+    support_unread: bool = False
+    support_unread_ids: list[str] = field(default_factory=list)
+    support_message: str | None = None  # latest message in the conversation
+    support_message_id: str | None = None
+    support_message_from: str | None = None  # "agent" | "me"
+    support_message_at: datetime | None = None
+    support_transcript: list[dict[str, Any]] = field(default_factory=list)
+
+    def copy_support_from(self, other: WoltState) -> None:
+        for name in (
+            "support_conversation_id",
+            "support_status",
+            "support_purchase_id",
+            "support_agent",
+            "support_unread",
+            "support_unread_ids",
+            "support_message",
+            "support_message_id",
+            "support_message_from",
+            "support_message_at",
+            "support_transcript",
+        ):
+            setattr(self, name, getattr(other, name))
 
 
 class WoltCoordinator(DataUpdateCoordinator[WoltState]):
@@ -100,17 +144,29 @@ class WoltCoordinator(DataUpdateCoordinator[WoltState]):
         )
 
     async def _async_update_data(self) -> WoltState:
+        prev = self.data or WoltState()
+        state = WoltState(last_update=datetime.now(tz=timezone.utc))
         try:
-            return await self._poll(self.data or WoltState())
+            await self._poll_order(state, prev)
         except WoltAuthError as err:
             # Marks entities unavailable and starts HA's re-authentication flow.
             raise ConfigEntryAuthFailed(str(err)) from err
         except WoltApiError as err:
             raise UpdateFailed(str(err)) from err
+        # The chat is secondary: a failure there keeps the last chat state and
+        # never takes the courier tracking down with it.
+        try:
+            await self._poll_support(state, prev)
+        except WoltAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except WoltApiError as err:
+            _LOGGER.warning("Wolt support chat poll failed: %s", err)
+            state.copy_support_from(prev)
+        return state
 
-    async def _poll(self, prev: WoltState) -> WoltState:
-        state = WoltState(last_update=datetime.now(tz=timezone.utc))
+    # ---------------------------------------------------------------- order
 
+    async def _poll_order(self, state: WoltState, prev: WoltState) -> None:
         # 1. Which order (if any) are we following?
         need_discovery = self._purchase_id is None or (
             prev.status in TERMINAL_STATUSES and prev.purchase_id == self._purchase_id
@@ -121,7 +177,7 @@ class WoltCoordinator(DataUpdateCoordinator[WoltState]):
             if not active:
                 self._close_latched_for = None
                 self.update_interval = self._idle
-                return state
+                return
 
         assert self._purchase_id
         state.purchase_id = self._purchase_id
@@ -194,4 +250,135 @@ class WoltCoordinator(DataUpdateCoordinator[WoltState]):
             self.update_interval = self._courier
         else:
             self.update_interval = self._active
-        return state
+
+    # -------------------------------------------------------------- support
+
+    def _read_by_me(self, message: dict[str, Any]) -> bool:
+        me = self.api.contact_id
+        for r in message.get("readBy") or []:
+            if isinstance(r, dict) and r.get("type") == "contact" and (me is None or r.get("id") == me):
+                return True
+        return False
+
+    @staticmethod
+    def _sender(message: dict[str, Any]) -> str:
+        return "me" if (message.get("from") or {}).get("type") == "contact" else "agent"
+
+    @staticmethod
+    def _body(message: dict[str, Any]) -> str:
+        if message.get("deletedAt"):
+            return "(message deleted)"
+        return str(message.get("body") or "")
+
+    async def _poll_support(self, state: WoltState, prev: WoltState) -> None:
+        data = await self.api.async_support_conversations(SUPPORT_STATUS_OPENED)
+        convs = [c for c in data["conversations"] if isinstance(c, dict) and c.get("id")]
+        if not convs:
+            # Nothing open. Keep the last conversation readable but mark it
+            # closed; the "unread" signal only ever refers to an open chat.
+            state.copy_support_from(prev)
+            state.support_status = "resolved" if prev.support_conversation_id else None
+            state.support_unread = False
+            state.support_unread_ids = []
+            return
+
+        latest = {
+            m.get("conversationId"): m
+            for m in data.get("latestMessages") or []
+            if isinstance(m, dict)
+        }
+        users = {u.get("id"): u for u in data.get("users") or [] if isinstance(u, dict)}
+
+        # Prefer the chat about the order we follow, else the freshest one.
+        conv = None
+        if state.purchase_id:
+            conv = next(
+                (c for c in convs if (c.get("metadata") or {}).get("purchaseId") == state.purchase_id),
+                None,
+            )
+        if conv is None:
+            conv = max(convs, key=lambda c: str(c.get("updatedAt") or ""))
+        cid = conv["id"]
+        state.support_conversation_id = cid
+        state.support_status = conv.get("status")
+        state.support_purchase_id = (conv.get("metadata") or {}).get("purchaseId")
+        assignee = next(
+            (a for a in conv.get("assignees") or [] if isinstance(a, dict) and a.get("type") == "user"),
+            None,
+        )
+        if assignee:
+            state.support_agent = ((users.get(assignee.get("id")) or {}).get("name") or {}).get("firstName")
+
+        last = latest.get(cid)
+        if last:
+            state.support_message_id = last.get("id")
+            state.support_message = self._body(last)
+            state.support_message_from = self._sender(last)
+            state.support_message_at = _iso_date(last.get("createdAt"))
+            state.support_unread = (
+                state.support_message_from == "agent"
+                and not last.get("deletedAt")
+                and not self._read_by_me(last)
+            )
+
+        # Transcript: only re-fetch when something changed; it is the source
+        # of the unread message ids the mark_read service needs.
+        changed = (
+            cid != prev.support_conversation_id
+            or state.support_message_id != prev.support_message_id
+            or not prev.support_transcript
+        )
+        if changed:
+            mdata = await self.api.async_support_messages(cid)
+            musers = {u.get("id"): u for u in mdata.get("users") or [] if isinstance(u, dict)}
+            msgs = [m for m in mdata["messages"] if isinstance(m, dict) and m.get("id")]
+            msgs.sort(key=lambda m: str(m.get("createdAt") or ""))
+            transcript = []
+            for m in msgs[-SUPPORT_TRANSCRIPT_LIMIT:]:
+                sender = self._sender(m)
+                name = None
+                if sender == "agent":
+                    name = ((musers.get((m.get("from") or {}).get("id")) or {}).get("name") or {}).get("firstName")
+                transcript.append(
+                    {
+                        "id": m.get("id"),
+                        "from": sender,
+                        "name": name,
+                        "body": self._body(m),
+                        "at": m.get("createdAt"),
+                        "read": self._read_by_me(m) if sender == "agent" else True,
+                    }
+                )
+            state.support_transcript = transcript
+            state.support_unread_ids = [
+                m["id"]
+                for m in msgs
+                if self._sender(m) == "agent" and not m.get("deletedAt") and not self._read_by_me(m)
+            ]
+            if not state.support_agent and transcript:
+                state.support_agent = next((t["name"] for t in reversed(transcript) if t["name"]), None)
+        else:
+            state.support_transcript = prev.support_transcript
+            state.support_unread_ids = prev.support_unread_ids if state.support_unread else []
+
+        # A new agent message that nobody has read yet: tell the automations once.
+        if (
+            state.support_unread
+            and state.support_message_id
+            and state.support_message_id != prev.support_message_id
+        ):
+            venue = state.venue_name if state.support_purchase_id == state.purchase_id else None
+            _LOGGER.info("Wolt support message from %s (order %s)", state.support_agent, state.support_purchase_id)
+            self.hass.bus.async_fire(
+                EVENT_SUPPORT_MESSAGE,
+                {
+                    "conversation_id": cid,
+                    "purchase_id": state.support_purchase_id,
+                    "venue": venue,
+                    "agent": state.support_agent,
+                    "message": state.support_message,
+                    "message_id": state.support_message_id,
+                    "received_at": state.support_message_at.isoformat() if state.support_message_at else None,
+                    "unread_count": len(state.support_unread_ids),
+                },
+            )

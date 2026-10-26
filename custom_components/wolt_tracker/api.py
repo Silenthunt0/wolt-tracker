@@ -32,6 +32,10 @@ from .const import (
     CONVERSE_WIDGET_URL,
     ORDER_STATUS_IN_PROGRESS,
     ORDERS_URL,
+    REVIEW_TEMPLATE_URL,
+    REVIEW_URL,
+    SUBSCRIPTION_URL,
+    SUBSCRIPTIONS_URL,
     TOKEN_REFRESH_MARGIN,
     TRACKING_URL,
 )
@@ -142,12 +146,22 @@ class WoltApi:
             return self.access_token
 
     async def _get(self, url: str, params: dict[str, Any] | None = None) -> Any:
+        return await self._request("GET", url, params=params)
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        params: dict[str, Any] | None = None,
+        json_body: Any = None,
+    ) -> Any:
+        """Authenticated call to Wolt's consumer APIs; one forced refresh on 401."""
         token = await self._ensure_token()
         for attempt in (0, 1):
             headers = {**API_HEADERS, "Authorization": f"Bearer {token}"}
             try:
-                async with self._session.get(
-                    url, headers=headers, params=params, timeout=TIMEOUT
+                async with self._session.request(
+                    method, url, headers=headers, params=params, json=json_body, timeout=TIMEOUT
                 ) as resp:
                     if resp.status == 401 and attempt == 0:
                         # Access token revoked early: force one refresh and retry.
@@ -155,12 +169,21 @@ class WoltApi:
                             await self.async_refresh()
                             token = self.access_token or ""
                         continue
-                    if resp.status != 200:
-                        raise WoltApiError(f"GET {url} -> HTTP {resp.status}")
-                    return await resp.json(content_type=None)
+                    if resp.status >= 400:
+                        body = await resp.text()
+                        raise WoltApiError(f"{method} {url} -> HTTP {resp.status}: {body[:200]}")
+                    if resp.status == 204 or resp.content_length == 0:
+                        return None
+                    text = await resp.text()
+                    if not text:
+                        return None
+                    try:
+                        return json.loads(text)
+                    except ValueError:
+                        return text
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-                raise WoltApiError(f"GET {url} failed: {err}") from err
-        raise WoltApiError(f"GET {url} kept returning 401")
+                raise WoltApiError(f"{method} {url} failed: {err}") from err
+        raise WoltApiError(f"{method} {url} kept returning 401")
 
     # ---------------------------------------------------------------- orders
 
@@ -183,6 +206,39 @@ class WoltApi:
         if not isinstance(data, dict) or "order_details" not in data:
             raise WoltApiError(f"tracking payload malformed: {str(data)[:200]}")
         return data
+
+    # --------------------------------------------------------------- rating
+
+    async def async_subscriptions(self) -> list[dict[str, Any]]:
+        """Orders Wolt still considers "subscribed": in progress, or delivered
+        and not yet rated / dismissed. Each has order_id, status, venue_name,
+        subscribed and (for group orders) group.my_member.is_host."""
+        data = await self._get(SUBSCRIPTIONS_URL)
+        orders = data.get("order_details") if isinstance(data, dict) else None
+        if not isinstance(orders, list):
+            raise WoltApiError(f"subscriptions payload malformed: {str(data)[:200]}")
+        return [o for o in orders if isinstance(o, dict) and o.get("order_id")]
+
+    async def async_review_template(self, purchase_id: str) -> dict[str, Any]:
+        """The rating form for a delivered order: {"food": {...}, "delivery": {...}}
+        with title, message, variant_name, five ratings (index + 1 = value)
+        and attribution_options (tags valid for given rating values)."""
+        data = await self._get(REVIEW_TEMPLATE_URL.format(purchase_id=purchase_id))
+        results = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(results, dict) or not isinstance(results.get("food"), dict):
+            raise WoltApiError(f"review template malformed: {str(data)[:200]}")
+        return results
+
+    async def async_review_submit(self, purchase_id: str, review: dict[str, Any]) -> None:
+        """Post the rating, the same body shape the web app sends:
+        {"food": {"rating", "variant_name", "attribution", "comment", "skipped": false},
+         "delivery": {...}} or {"skipped": true, "variant_name", "attribution": []}."""
+        await self._request("POST", REVIEW_URL.format(purchase_id=purchase_id), json_body=review)
+
+    async def async_unsubscribe_order(self, purchase_id: str) -> None:
+        """Close the rating prompt for an order (what the web app does after
+        rating, or when the prompt is dismissed)."""
+        await self._request("DELETE", SUBSCRIPTION_URL.format(purchase_id=purchase_id))
 
     # ---------------------------------------------------------- support chat
 

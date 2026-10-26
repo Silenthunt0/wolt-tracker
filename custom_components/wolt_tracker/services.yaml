@@ -16,3 +16,50 @@ mark_read:
       required: false
       selector:
         text:
+rate:
+  fields:
+    food_rating:
+      required: false
+      example: 5
+      selector:
+        number:
+          min: 1
+          max: 5
+          mode: slider
+    food_tags:
+      required: false
+      example: '["Tasty", "Fresh"]'
+      selector:
+        object:
+    food_comment:
+      required: false
+      selector:
+        text:
+          multiline: true
+    delivery_rating:
+      required: false
+      example: 4
+      selector:
+        number:
+          min: 1
+          max: 5
+          mode: slider
+    delivery_tags:
+      required: false
+      selector:
+        object:
+    delivery_comment:
+      required: false
+      selector:
+        text:
+          multiline: true
+    purchase_id:
+      required: false
+      selector:
+        text:
+dismiss_rating:
+  fields:
+    purchase_id:
+      required: false
+      selector:
+        text:

@@ -27,6 +27,18 @@ AUTH_URL = "https://authentication.wolt.com/v1/wauth2/access_token"
 ORDERS_URL = "https://consumer-api.wolt.com/order-xp/web/v1/pages/orders"
 TRACKING_URL = "https://restaurant-api.wolt.com/v2/order_details/purchase_tracking/{purchase_id}"
 
+# Post-delivery rating ("How was it?"). Wolt keeps a delivered order
+# "subscribed" until it is rated or the prompt is dismissed; the web app
+# shows the two-step rating (food, then delivery) for delivered orders that
+# are still subscribed and deletes the subscription afterwards.
+SUBSCRIPTIONS_URL = "https://restaurant-api.wolt.com/v2/order_details/subscriptions"
+SUBSCRIPTION_URL = "https://restaurant-api.wolt.com/v2/order_details/subscriptions/{purchase_id}"
+REVIEW_TEMPLATE_URL = "https://restaurant-api.wolt.com/v1/reviews/purchases/{purchase_id}/template"
+REVIEW_URL = "https://restaurant-api.wolt.com/v1/reviews/purchases/{purchase_id}"
+RATING_SECTIONS = ("food", "delivery")  # step 1 and step 2 of the prompt
+RATING_MIN = 1
+RATING_MAX = 5
+
 # Support chat ("Converse", Wolt's in-house chat backend behind the support
 # widget). The Wolt access token is exchanged for a Converse token.
 CONVERSE_BASE = "https://converse-api.wolt.com"
@@ -39,16 +51,29 @@ SUPPORT_TRANSCRIPT_LIMIT = 10  # messages kept in the sensor attribute
 # Fired once per new support message written by a Wolt agent.
 EVENT_SUPPORT_MESSAGE = "wolt_tracker_support_message"
 
+# Fired once per delivered order that is waiting for a rating.
+EVENT_RATING_PENDING = "wolt_tracker_rating_pending"
+
 SERVICE_REPLY = "reply"
 SERVICE_MARK_READ = "mark_read"
+SERVICE_RATE = "rate"
+SERVICE_DISMISS_RATING = "dismiss_rating"
 ATTR_MESSAGE = "message"
 ATTR_CONVERSATION_ID = "conversation_id"
+ATTR_PURCHASE_ID = "purchase_id"
+ATTR_FOOD_RATING = "food_rating"
+ATTR_FOOD_TAGS = "food_tags"
+ATTR_FOOD_COMMENT = "food_comment"
+ATTR_DELIVERY_RATING = "delivery_rating"
+ATTR_DELIVERY_TAGS = "delivery_tags"
+ATTR_DELIVERY_COMMENT = "delivery_comment"
 
 # Refresh the access token this long before it expires (it lives 1800 s).
 TOKEN_REFRESH_MARGIN = 120
 
 ORDER_STATUS_IN_PROGRESS = "IN_PROGRESS"  # orders page, telemetry.order_status_type
 STATUS_READY = "ready"  # order_details.status while the courier is en route
+STATUS_DELIVERED = "delivered"
 TERMINAL_STATUSES = {"delivered", "rejected", "refunded"}
 SUPPORT_STATUS_OPENED = "opened"
 SUPPORT_STATUS_RESOLVED = "resolved"

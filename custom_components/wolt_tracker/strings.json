@@ -63,6 +63,50 @@
           "description": "Converse conversation id. Defaults to the followed conversation."
         }
       }
+    },
+    "rate": {
+      "name": "Rate a delivered order",
+      "description": "Submits the two-step rating (food, then delivery) for the delivered order that is waiting for one, exactly as given. A step without a rating is sent as skipped. Nothing is rated unless this service is called.",
+      "fields": {
+        "food_rating": {
+          "name": "Food rating",
+          "description": "1 (worst) to 5 (best); the labels are in the Rating pending sensor's food_ratings attribute."
+        },
+        "food_tags": {
+          "name": "Food tags",
+          "description": "Optional tags from the food_tags attribute for that rating, by name."
+        },
+        "food_comment": {
+          "name": "Food comment",
+          "description": "Optional free text for the venue."
+        },
+        "delivery_rating": {
+          "name": "Delivery rating",
+          "description": "1 (worst) to 5 (best); labels in the delivery_ratings attribute."
+        },
+        "delivery_tags": {
+          "name": "Delivery tags",
+          "description": "Optional tags from the delivery_tags attribute for that rating, by name."
+        },
+        "delivery_comment": {
+          "name": "Delivery comment",
+          "description": "Optional free text about the delivery."
+        },
+        "purchase_id": {
+          "name": "Order",
+          "description": "Wolt purchase id. Defaults to the order waiting for a rating."
+        }
+      }
+    },
+    "dismiss_rating": {
+      "name": "Dismiss the rating prompt",
+      "description": "Closes the rating prompt for the delivered order without rating it (the same as closing it in the app).",
+      "fields": {
+        "purchase_id": {
+          "name": "Order",
+          "description": "Wolt purchase id. Defaults to the order waiting for a rating."
+        }
+      }
     }
   }
 }

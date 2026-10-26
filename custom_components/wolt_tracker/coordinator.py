@@ -27,7 +27,10 @@ from .const import (
     DEFAULT_COURIER_INTERVAL,
     DEFAULT_IDLE_INTERVAL,
     DOMAIN,
+    EVENT_RATING_PENDING,
     EVENT_SUPPORT_MESSAGE,
+    RATING_SECTIONS,
+    STATUS_DELIVERED,
     STATUS_READY,
     SUPPORT_STATUS_OPENED,
     SUPPORT_STATUS_RESOLVED,
@@ -102,6 +105,23 @@ class WoltState:
     support_message_at: datetime | None = None
     support_transcript: list[dict[str, Any]] = field(default_factory=list)
 
+    # Post-delivery rating: the newest delivered order Wolt still wants rated.
+    rating_pending: bool = False
+    rating_purchase_id: str | None = None
+    rating_venue: str | None = None
+    rating_ordered_at: datetime | None = None
+    rating_template: dict[str, Any] | None = None  # {"food": {...}, "delivery": {...}}
+
+    def copy_rating_from(self, other: WoltState) -> None:
+        for name in (
+            "rating_pending",
+            "rating_purchase_id",
+            "rating_venue",
+            "rating_ordered_at",
+            "rating_template",
+        ):
+            setattr(self, name, getattr(other, name))
+
     def copy_support_from(self, other: WoltState) -> None:
         for name in (
             "support_conversation_id",
@@ -134,6 +154,7 @@ class WoltCoordinator(DataUpdateCoordinator[WoltState]):
         self.apply_options(entry.options)
         self._purchase_id: str | None = None
         self._close_latched_for: str | None = None
+        self._rating_templates: dict[str, dict[str, Any]] = {}  # purchase_id -> normalised template
 
     def apply_options(self, options: dict[str, Any]) -> None:
         self.close_distance = float(options.get(CONF_CLOSE_DISTANCE, DEFAULT_CLOSE_DISTANCE))
@@ -163,6 +184,14 @@ class WoltCoordinator(DataUpdateCoordinator[WoltState]):
         except WoltApiError as err:
             _LOGGER.warning("Wolt support chat poll failed: %s", err)
             state.copy_support_from(prev)
+        # Same for the rating prompt.
+        try:
+            await self._poll_rating(state, prev)
+        except WoltAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except WoltApiError as err:
+            _LOGGER.warning("Wolt rating poll failed: %s", err)
+            state.copy_rating_from(prev)
         return state
 
     # ---------------------------------------------------------------- order
@@ -251,6 +280,99 @@ class WoltCoordinator(DataUpdateCoordinator[WoltState]):
             self.update_interval = self._courier
         else:
             self.update_interval = self._active
+
+    # --------------------------------------------------------------- rating
+
+    async def _poll_rating(self, state: WoltState, prev: WoltState) -> None:
+        """Delivered orders stay "subscribed" until rated or dismissed; that
+        is exactly the set the Wolt app shows the two-step rating for."""
+        orders = await self.api.async_subscriptions()
+        waiting = [
+            o
+            for o in orders
+            if o.get("status") == STATUS_DELIVERED
+            and o.get("subscribed", True)
+            # Group orders are rated by the host only.
+            and ((o.get("group") or {}).get("my_member") or {}).get("is_host") is not False
+        ]
+        if not waiting:
+            # Rated (in the app or through the service) or dismissed: forget it.
+            self._rating_templates.clear()
+            return
+        order = max(waiting, key=lambda o: ((_mongo_date(o.get("payment_time")) or datetime.min.replace(tzinfo=timezone.utc)), str(o["order_id"])))
+        pid = str(order["order_id"])
+        state.rating_pending = True
+        state.rating_purchase_id = pid
+        state.rating_venue = order.get("venue_name")
+        state.rating_ordered_at = _mongo_date(order.get("payment_time"))
+
+        template = self._rating_templates.get(pid)
+        if template is None:
+            try:
+                template = self._normalise_template(await self.api.async_review_template(pid))
+                self._rating_templates[pid] = template
+            except WoltApiError as err:
+                # Still announce; the rate service re-fetches the template itself.
+                _LOGGER.warning("Could not load the Wolt rating form for %s: %s", pid, err)
+        state.rating_template = template
+
+        if pid != prev.rating_purchase_id:
+            _LOGGER.info("Wolt order %s (%s) is waiting for a rating", pid, state.rating_venue)
+            self.hass.bus.async_fire(
+                EVENT_RATING_PENDING,
+                {
+                    "purchase_id": pid,
+                    "venue": state.rating_venue,
+                    "ordered_at": state.rating_ordered_at.isoformat() if state.rating_ordered_at else None,
+                    "template": template,
+                },
+            )
+
+    async def async_rating_template(self, purchase_id: str) -> dict[str, Any]:
+        """Normalised rating form for an order (cached per order)."""
+        template = self._rating_templates.get(purchase_id)
+        if template is None:
+            template = self._normalise_template(await self.api.async_review_template(purchase_id))
+            self._rating_templates[purchase_id] = template
+        return template
+
+    def forget_rating(self, purchase_id: str) -> None:
+        self._rating_templates.pop(purchase_id, None)
+
+    @staticmethod
+    def _normalise_template(results: dict[str, Any]) -> dict[str, Any]:
+        """Flatten Wolt's template into what a person (or an LLM) needs to
+        pick a value: per section the five labels (value = position, 1..5)
+        and which tags may accompany which value."""
+        out: dict[str, Any] = {}
+        for section in RATING_SECTIONS:
+            raw = results.get(section)
+            if not isinstance(raw, dict):
+                continue
+            labels = [
+                (r.get("label") or r.get("title") or "")
+                for r in raw.get("ratings") or []
+                if isinstance(r, dict)
+            ]
+            tags: dict[int, list[dict[str, str]]] = {}
+            for opt in raw.get("attribution_options") or []:
+                if not isinstance(opt, dict):
+                    continue
+                for value in opt.get("ratings") or []:
+                    if isinstance(value, int):
+                        tags.setdefault(value, []).extend(
+                            {"key": t.get("key"), "name": t.get("name")}
+                            for t in opt.get("tags") or []
+                            if isinstance(t, dict) and t.get("key")
+                        )
+            out[section] = {
+                "title": raw.get("title"),
+                "message": raw.get("message"),
+                "variant_name": raw.get("variant_name"),
+                "ratings": {i + 1: label for i, label in enumerate(labels)},
+                "tags": tags,
+            }
+        return out
 
     # -------------------------------------------------------------- support
 

@@ -1,4 +1,4 @@
-"""Binary sensors: courier close, order active, support unread."""
+"""Binary sensors: courier close, order active, support unread, rating pending."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ async def async_setup_entry(
             WoltCourierCloseSensor(coordinator),
             WoltOrderActiveSensor(coordinator),
             WoltSupportUnreadSensor(coordinator),
+            WoltRatingPendingSensor(coordinator),
         ]
     )
 
@@ -92,3 +93,39 @@ class WoltSupportUnreadSensor(WoltEntity, BinarySensorEntity):
             "received_at": s.support_message_at.isoformat() if s.support_unread and s.support_message_at else None,
             "unread_count": len(s.support_unread_ids),
         }
+
+
+class WoltRatingPendingSensor(WoltEntity, BinarySensorEntity):
+    """On while a delivered order is waiting for its rating (the two-step
+    "How was it?" prompt in the Wolt app). The attributes carry the form:
+    per step the five labels (value 1..5) and the tags allowed with each
+    value, so whoever rates can pick from Wolt's own words. Rating in the
+    app, wolt_tracker.rate or wolt_tracker.dismiss_rating turn it off."""
+
+    _attr_name = "Rating pending"
+    _attr_icon = "mdi:star-outline"
+
+    def __init__(self, coordinator) -> None:
+        super().__init__(coordinator, "rating_pending")
+
+    @property
+    def is_on(self) -> bool:
+        return self.state_data.rating_pending
+
+    @property
+    def extra_state_attributes(self):
+        s = self.state_data
+        tpl = s.rating_template or {}
+        attrs = {
+            "purchase_id": s.rating_purchase_id,
+            "venue": s.rating_venue,
+            "ordered_at": s.rating_ordered_at.isoformat() if s.rating_ordered_at else None,
+            "steps": list(tpl),
+        }
+        for step, data in tpl.items():
+            attrs[f"{step}_title"] = data.get("title")
+            attrs[f"{step}_ratings"] = data.get("ratings")
+            attrs[f"{step}_tags"] = {
+                value: [t["name"] or t["key"] for t in tags] for value, tags in (data.get("tags") or {}).items()
+            }
+        return attrs

@@ -38,6 +38,7 @@ token there.
 | `binary_sensor.wolt_order_active` | an order is in progress |
 | `binary_sensor.wolt_support_unread` | on while the latest message in the open support chat is from a Wolt agent and has no read receipt from you; attributes carry the text, agent, conversation and purchase id |
 | `sensor.wolt_support_last_message` | latest message in the followed support chat (state cut to 255 chars); attributes: full `message`, `from` (`agent` / `me`), `agent`, `conversation_status`, `purchase_id`, `venue`, `transcript` (last 10 messages) |
+| `binary_sensor.wolt_rating_pending` | on while a delivered order waits for its rating; attributes: `purchase_id`, `venue`, `ordered_at`, `steps`, `food_ratings`, `food_tags`, `delivery_ratings`, `delivery_tags` |
 
 Only the newest in-progress order is followed. For the chat, the open
 conversation whose `purchaseId` matches that order is followed, else the most
@@ -89,6 +90,30 @@ The chat backend is Wolt's in-house "Converse" service. It needs its own
 bearer token, obtained by exchanging the current Wolt access token in a
 single POST, so it involves no refresh chain and cannot invalidate the login
 below.
+
+## Rating a delivered order
+
+Wolt keeps a delivered order "subscribed" until it has been rated or the
+prompt was closed, and that is exactly when the app shows its two-step
+"How was it?" (food, then delivery). The integration polls that list and:
+
+- turns `binary_sensor.wolt_rating_pending` on, with `purchase_id`, `venue`,
+  `ordered_at`, `steps`, and per step the five labels (`food_ratings`,
+  `delivery_ratings`: value 1 to 5) and the tags Wolt allows with each value
+  (`food_tags`, `delivery_tags`);
+- fires `wolt_tracker_rating_pending` once per order, with the same form.
+
+| Service | What it does |
+| --- | --- |
+| `wolt_tracker.rate` | submits `food_rating` / `delivery_rating` (1 to 5), optional `food_tags` / `delivery_tags` (by name, validated against the form for that value) and `food_comment` / `delivery_comment`; a step without a rating is sent as skipped. Then closes the prompt. |
+| `wolt_tracker.dismiss_rating` | closes the prompt without rating, like dismissing it in the app |
+
+Both default to the pending order and accept `purchase_id`. Nothing in the
+integration rates on its own. Rating in the app clears the sensor on the
+next poll. Tipping is part of the app's second step but is a payment and is
+deliberately not implemented. The request bodies were reconstructed from
+the web app and have not been exercised against a live order yet; the first
+real rating is the test.
 
 ## The token (the one fragile part)
 

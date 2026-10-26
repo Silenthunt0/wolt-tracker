@@ -4,12 +4,15 @@ the support chat for messages from Wolt's agents.
 
 Set up from the UI (Settings → Devices & services → Add integration → Wolt).
 Services `wolt_tracker.reply` and `wolt_tracker.mark_read` act on the open
-support conversation; nothing in here ever answers support on its own.
+support conversation; `wolt_tracker.rate` and `wolt_tracker.dismiss_rating`
+act on the delivered order waiting for its rating. Nothing in here ever
+answers support or rates an order on its own.
 """
 
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import voluptuous as vol
 
@@ -24,12 +27,24 @@ from homeassistant.helpers.typing import ConfigType
 from .api import WoltApi, WoltApiError
 from .const import (
     ATTR_CONVERSATION_ID,
+    ATTR_DELIVERY_COMMENT,
+    ATTR_DELIVERY_RATING,
+    ATTR_DELIVERY_TAGS,
+    ATTR_FOOD_COMMENT,
+    ATTR_FOOD_RATING,
+    ATTR_FOOD_TAGS,
     ATTR_MESSAGE,
+    ATTR_PURCHASE_ID,
     CONF_ACCESS_TOKEN,
     CONF_EXPIRES_AT,
     CONF_REFRESH_TOKEN,
     DOMAIN,
+    RATING_MAX,
+    RATING_MIN,
+    RATING_SECTIONS,
+    SERVICE_DISMISS_RATING,
     SERVICE_MARK_READ,
+    SERVICE_RATE,
     SERVICE_REPLY,
     SUPPORT_STATUS_OPENED,
 )
@@ -47,6 +62,21 @@ REPLY_SCHEMA = vol.Schema(
     }
 )
 MARK_READ_SCHEMA = vol.Schema({vol.Optional(ATTR_CONVERSATION_ID): cv.string})
+
+_RATING = vol.All(vol.Coerce(int), vol.Range(min=RATING_MIN, max=RATING_MAX))
+_TAGS = vol.All(cv.ensure_list, [cv.string])
+RATE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_PURCHASE_ID): cv.string,
+        vol.Optional(ATTR_FOOD_RATING): _RATING,
+        vol.Optional(ATTR_FOOD_TAGS): _TAGS,
+        vol.Optional(ATTR_FOOD_COMMENT): cv.string,
+        vol.Optional(ATTR_DELIVERY_RATING): _RATING,
+        vol.Optional(ATTR_DELIVERY_TAGS): _TAGS,
+        vol.Optional(ATTR_DELIVERY_COMMENT): cv.string,
+    }
+)
+DISMISS_RATING_SCHEMA = vol.Schema({vol.Optional(ATTR_PURCHASE_ID): cv.string})
 
 type WoltConfigEntry = ConfigEntry[WoltCoordinator]
 
@@ -93,8 +123,96 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             raise HomeAssistantError(f"Could not mark the Wolt messages as read: {err}") from err
         await coordinator.async_request_refresh()
 
+    def _pending_order(call: ServiceCall, coordinator: WoltCoordinator) -> str:
+        state = coordinator.data or WoltState()
+        purchase_id = call.data.get(ATTR_PURCHASE_ID) or state.rating_purchase_id
+        if not purchase_id:
+            raise ServiceValidationError("No delivered Wolt order is waiting for a rating")
+        return purchase_id
+
+    async def _rate(call: ServiceCall) -> None:
+        coordinator = _coordinator(hass)
+        purchase_id = _pending_order(call, coordinator)
+        given = {
+            "food": (call.data.get(ATTR_FOOD_RATING), call.data.get(ATTR_FOOD_TAGS) or [], call.data.get(ATTR_FOOD_COMMENT)),
+            "delivery": (
+                call.data.get(ATTR_DELIVERY_RATING),
+                call.data.get(ATTR_DELIVERY_TAGS) or [],
+                call.data.get(ATTR_DELIVERY_COMMENT),
+            ),
+        }
+        if all(rating is None for rating, _, _ in given.values()):
+            raise ServiceValidationError("Give at least one of food_rating or delivery_rating (1 to 5)")
+        try:
+            template = await coordinator.async_rating_template(purchase_id)
+        except WoltApiError as err:
+            raise HomeAssistantError(f"Could not load the Wolt rating form: {err}") from err
+
+        review: dict[str, Any] = {}
+        for section in RATING_SECTIONS:
+            form = template.get(section)
+            rating, tags, comment = given[section]
+            if form is None:
+                if rating is not None:
+                    raise ServiceValidationError(f"This order has no {section} rating step")
+                continue
+            if rating is None:
+                review[section] = {"skipped": True, "variant_name": form.get("variant_name"), "attribution": []}
+                continue
+            allowed = {
+                (t["name"] or "").casefold(): t["key"] for t in (form.get("tags") or {}).get(rating, [])
+            }
+            allowed.update({t["key"].casefold(): t["key"] for t in (form.get("tags") or {}).get(rating, [])})
+            keys: list[str] = []
+            for tag in tags:
+                if not tag.strip():
+                    continue
+                key = allowed.get(tag.strip().casefold())
+                if key is None:
+                    names = ", ".join(sorted({t["name"] or t["key"] for t in (form.get("tags") or {}).get(rating, [])}))
+                    raise ServiceValidationError(
+                        f"'{tag}' is not a Wolt tag for a {section} rating of {rating}"
+                        + (f"; choose from: {names}" if names else "; this rating takes no tags")
+                    )
+                if key not in keys:
+                    keys.append(key)
+            entry: dict[str, Any] = {
+                "rating": rating,
+                "variant_name": form.get("variant_name"),
+                "attribution": keys,
+                "skipped": False,
+            }
+            if comment and comment.strip():
+                entry["comment"] = comment.strip()
+            review[section] = entry
+
+        try:
+            await coordinator.api.async_review_submit(purchase_id, review)
+        except WoltApiError as err:
+            raise HomeAssistantError(f"Wolt did not accept the rating: {err}") from err
+        _LOGGER.info("Rated Wolt order %s: %s", purchase_id, {k: v.get("rating", "skipped") for k, v in review.items()})
+        try:
+            await coordinator.api.async_unsubscribe_order(purchase_id)
+        except WoltApiError as err:
+            _LOGGER.warning("Rating saved but the prompt could not be closed: %s", err)
+        coordinator.forget_rating(purchase_id)
+        await coordinator.async_request_refresh()
+
+    async def _dismiss_rating(call: ServiceCall) -> None:
+        coordinator = _coordinator(hass)
+        purchase_id = _pending_order(call, coordinator)
+        try:
+            await coordinator.api.async_unsubscribe_order(purchase_id)
+        except WoltApiError as err:
+            raise HomeAssistantError(f"Could not dismiss the Wolt rating prompt: {err}") from err
+        _LOGGER.info("Dismissed the rating prompt for Wolt order %s", purchase_id)
+        coordinator.forget_rating(purchase_id)
+        await coordinator.async_request_refresh()
+
     hass.services.async_register(DOMAIN, SERVICE_REPLY, _reply, schema=REPLY_SCHEMA)
     hass.services.async_register(DOMAIN, SERVICE_MARK_READ, _mark_read, schema=MARK_READ_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_RATE, _rate, schema=RATE_SCHEMA)
+    hass.services.async_register(DOMAIN, SERVICE_DISMISS_RATING, _dismiss_rating, schema=DISMISS_RATING_SCHEMA)
     return True
 
 
